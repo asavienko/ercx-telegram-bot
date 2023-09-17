@@ -1,0 +1,1 @@
+web: python -m ercx-telegram-bot
