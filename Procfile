@@ -1,1 +1,1 @@
-web: python -m ercx-telegram-bot
+web: poetry run python __main__.py
