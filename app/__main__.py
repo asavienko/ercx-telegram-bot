@@ -1,16 +1,3 @@
-#!/usr/bin/env python
-# pylint: disable=unused-argument
-# This program is dedicated to the public domain under the CC0 license.
-
-"""
-Simple Bot to handle '(my_)chat_member' updates.
-Greets new users & keeps track of which chats the bot is in.
-
-Usage:
-Press Ctrl-C on the command line or send a signal to the process to stop the
-bot.
-"""
-
 import logging
 import re
 
@@ -217,7 +204,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.start_webhook(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
