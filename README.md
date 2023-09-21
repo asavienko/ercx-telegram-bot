@@ -2,8 +2,8 @@
 
 
 ```bash
-poetry run python __main__.py
+poetry run python -m app
 ```
 ```bash
-nodemon --exec "poetry run python __main__.py" --ext py
+nodemon --exec "poetry run python -m app" --ext py
 ```

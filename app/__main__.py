@@ -1,13 +1,15 @@
+import asyncio
+import json
 import logging
 import re
 
 import requests
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    filters, CallbackContext, )
+    filters, CallbackContext, CallbackQueryHandler, )
 import os
 from dotenv import load_dotenv
 
@@ -40,6 +42,7 @@ STANDARDS = [ERC20, ERC4626]
 NETWORKS = [MAINNET, SEPOLIA, GOERLI]
 
 URL = "https://ercx.runtimeverification.com"
+GQL_URL = URL + "/graphql"
 
 NETWORKS_DICT = {
     MAINNET: 1,
@@ -80,10 +83,132 @@ def count_properties(data):
     return message
 
 
+async def create_report(standard, address, network):
+    logger.info(f"Creating report for {standard} {address} {network}")
+    query = '''
+    mutation CreateReportMutation($standard: TestSuiteStandard!, $address: String!, $network: Int!) {
+        createReport(input: {
+            address: $address,
+            forceCreate: false,
+            network: $network,
+            standard: $standard
+        }) {
+            id
+            tokenId
+            tokenClass
+            standard
+            userId
+            createdAt
+            updatedAt
+            version
+            jsonReport
+            progress
+            token {
+              id
+              address
+              name
+              symbol
+              network
+              isSourceContract
+              isBookmarked
+              createdAt
+              updatedAt
+            }
+            executeTestsTask {
+              id
+              reportId
+              status
+              terminalOutputs
+              createdAt
+              updatedAt
+            }
+        }}
+    '''
+
+    variables = {
+        'standard': standard,
+        'address': address,
+        'network': network,
+    }
+
+    headers = {
+        'Authentication': f'Bearer {ERCX_API_KEY}'
+    }
+    response = requests.post(
+        GQL_URL,
+        json={'query': query, 'variables': variables},
+        headers=headers
+    )
+    logger.info(response)
+    logger.info(response.content)
+    if response.status_code == 200:
+        result = json.loads(response.content.decode('utf-8'))
+        return result
+    else:
+        return None
+
+
+async def generate_report(update: Update, context: CallbackContext):
+    standard = context.user_data["selections"][update.effective_user.id]['standard']
+    address = context.user_data["selections"][update.effective_user.id]['address']
+    network = context.user_data["selections"][update.effective_user.id]['network']
+    await create_report(STANDARDS_DICT[standard], address, NETWORKS_DICT[network])
+
+
+async def check_report_is_ready(update: Update, context: CallbackContext):
+    standard = context.user_data["selections"][update.effective_user.id]['standard']
+    address = context.user_data["selections"][update.effective_user.id]['address']
+    network = context.user_data["selections"][update.effective_user.id]['network']
+    counter = 0
+    if update.message:
+        message = await update.message.reply_text("Report generating...")
+        chat_id = update.message.chat_id
+    elif update.callback_query:
+        message = await update.callback_query.message.reply_text("Report generating...")
+        chat_id = update.callback_query.message.chat_id
+    else:
+        print(f"Unexpected update: {update}")
+        return
+
+    while counter < 300:
+        data = get_report(address, STANDARDS_DICT[standard], NETWORKS_DICT[network])
+        if data:
+            await test_token_address(update, context)
+            return
+        else:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message.message_id,
+                text=f"Report generating...\n{counter}sec"
+            )
+            counter += 10
+            await asyncio.sleep(10)
+
+
+async def button(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "Yes":
+        await query.edit_message_text(
+            text=f"You selected generate report for this  address:\n\n"
+                 f"{context.user_data['selections'][update.effective_user.id]['address']}"
+                 "\n\nPlease wait while we are generating the report."
+        )
+        await generate_report(update, context)
+
+        await check_report_is_ready(update, context)
+
+    elif query.data == "No":
+        await start(update, context)
+        # Your logic for "No" goes here
+
+
 async def handle_text(update: Update, context: CallbackContext) -> None:
     message_text = update.message.text
     user_id = update.effective_user.id
 
+    logger.info(context.user_data)
     # Initialize the user's selection list if it doesn't exist
     if "selections" not in context.user_data:
         context.user_data["selections"] = {}
@@ -117,29 +242,54 @@ async def handle_text(update: Update, context: CallbackContext) -> None:
         await test_token_address(update, context)
 
 
-async def test_token_address(update: Update, context: CallbackContext) -> None:
-    user_id = update.effective_user.id
-    network = context.user_data["selections"][user_id]['network']
-    standard = context.user_data["selections"][user_id]['standard']
-    address = update.message.text
-    keyboard = [
-        [KeyboardButton(MAIN_MENU)]
-    ]
+def get_report(address, standard, network):
     headers = {
         'Authentication': f'Bearer {ERCX_API_KEY}'
     }
     params = {
-        'standard': STANDARDS_DICT[standard],
+        'standard': standard,
     }
-
-    response = requests.get(f"{URL}/api/v1/tokens/{NETWORKS_DICT[network]}/{address}/levels/all", headers=headers,
+    response = requests.get(f"{URL}/api/v1/tokens/{network}/{address}/levels/all", headers=headers,
                             params=params)
+    if response.status_code == 404:
+        return None
 
     data = response.json()
 
+    return data
+
+
+async def test_token_address(update: Update, context: CallbackContext) -> None:
+    user_id = update.effective_user.id
+    network = context.user_data["selections"][user_id]['network']
+    standard = context.user_data["selections"][user_id]['standard']
+    if 'address' in context.user_data["selections"][user_id]:
+        address = context.user_data["selections"][user_id]['address']
+    else:
+        address=  update.message.text
+
+    keyboard = [
+        [KeyboardButton(MAIN_MENU)]
+    ]
+
+    nested_keyboard = [
+        [InlineKeyboardButton("Yes", callback_data="Yes"),
+         InlineKeyboardButton("No", callback_data="No")]
+    ]
+
+    data = get_report(address, STANDARDS_DICT[standard], NETWORKS_DICT[network])
+
+    if not data:
+        context.user_data["selections"][user_id]['address'] = address
+        await update.effective_message.reply_text(
+            f"Token address {address} {standard} standard for {network} network is not found in our database.\n\n"
+            f"Would you like to generate a report for this token address?",
+            reply_markup=InlineKeyboardMarkup(nested_keyboard))
+        return
+
     message = f'Your {standard} token address is {address} deployed on {network} network.\n\n'
     message += count_properties(data)
-    message += f"\nFull report: {URL}/token/{address}"
+    message += f"\nFull report: {URL}/token/{address}?network={NETWORKS_DICT[network]}"
     await update.effective_message.reply_text(
         message,
         reply_markup=ReplyKeyboardMarkup(keyboard))
@@ -203,6 +353,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    application.add_handler(CallbackQueryHandler(button))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
